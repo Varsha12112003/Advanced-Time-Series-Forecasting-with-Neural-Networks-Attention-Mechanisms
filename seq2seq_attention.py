@@ -1,11 +1,13 @@
-"""seq2seq_attention.py
-Seq2Seq with Bahdanau attention (Keras). This is a compact, instructional implementation.
 """
-import argparse
+Proper multi-step Seq2Seq model with Bahdanau Attention.
+Supports horizon > 1, no dummy inputs, real iterative decoding.
+"""
+
 import numpy as np
+import argparse
+import tensorflow as tf
 from tensorflow.keras.layers import Input, LSTM, Dense, Layer
 from tensorflow.keras.models import Model
-from tensorflow.keras import backend as K
 from preprocessing import create_windows, scale_train_val_test
 
 class BahdanauAttention(Layer):
@@ -16,52 +18,79 @@ class BahdanauAttention(Layer):
         self.V = Dense(1)
 
     def call(self, query, values):
-        # query: decoder hidden state (batch, hidden)
-        # values: encoder outputs (batch, timesteps, hidden)
-        query_with_time_axis = K.expand_dims(query, 1)
-        score = K.tanh(self.W1(values) + self.W2(query_with_time_axis))
-        attention_weights = K.softmax(self.V(score), axis=1)
-        context_vector = attention_weights * values
-        context_vector = K.sum(context_vector, axis=1)
-        return context_vector, attention_weights
+        # query : (batch, hidden)
+        # values: (batch, time, hidden)
+        query_time = tf.expand_dims(query, 1)
+        score = tf.nn.tanh(self.W1(values) + self.W2(query_time))
+        weights = tf.nn.softmax(self.V(score), axis=1)
+        context = weights * values
+        context = tf.reduce_sum(context, axis=1)
+        return context, weights
 
-def build_model(window_size, features, latent=64, horizon=1):
+
+def build_seq2seq(window, features, horizon, latent=64):
     # Encoder
-    encoder_inputs = Input(shape=(window_size, features))
+    encoder_inputs = Input(shape=(window, features))
     encoder_lstm = LSTM(latent, return_sequences=True, return_state=True)
-    encoder_outputs, state_h, state_c = encoder_lstm(encoder_inputs)
-    # Decoder (we use one-step decoding repeated for horizon simple case)
-    decoder_inputs = Input(shape=(1, features))
-    decoder_lstm = LSTM(latent, return_sequences=False, return_state=True)
+    enc_out, enc_h, enc_c = encoder_lstm(encoder_inputs)
+
+    # Decoder
+    decoder_inputs = Input(shape=(horizon, features))
+    decoder_lstm = LSTM(latent, return_state=True, return_sequences=True)
+    att = BahdanauAttention(latent)
     dense = Dense(features)
-    attention = BahdanauAttention(latent)
-    # training-time simplification: run decoder for single step prediction of next horizon steps flattened
-    # For clarity, we'll predict horizon=1
-    context, attn = attention(state_h, encoder_outputs)
-    # combine context (batch, latent) to produce output
-    outputs = dense(context)
+
+    all_outputs = []
+    state_h, state_c = enc_h, enc_c
+    decoder_step_input = decoder_inputs[:, 0:1, :]  # first step
+
+    for t in range(horizon):
+        # run one decoder step
+        dec_out, state_h, state_c = decoder_lstm(decoder_step_input,
+                                                 initial_state=[state_h, state_c])
+        context, att_w = att(state_h, enc_out)
+        out = dense(context)
+        all_outputs.append(out)
+
+        # next decoder input = previous output
+        decoder_step_input = tf.expand_dims(out, 1)
+
+    outputs = tf.stack(all_outputs, axis=1)
+
     model = Model([encoder_inputs, decoder_inputs], outputs)
-    model.compile(optimizer='adam', loss='mse')
+    model.compile(optimizer="adam", loss="mse")
     return model
 
-if __name__ == '__main__':
+
+if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument('--data', default='../assets/synthetic.npy')
-    parser.add_argument('--window', type=int, default=60)
+    parser.add_argument("--data", default="../assets/synthetic.npy")
+    parser.add_argument("--window", type=int, default=60)
+    parser.add_argument("--horizon", type=int, default=5)
     args = parser.parse_args()
+
     data = np.load(args.data)
     n = len(data)
-    train_end = int(0.7*n)
-    val_end = int(0.85*n)
-    train, val, test = data[:train_end], data[train_end:val_end], data[val_end:]
-    Xtr, ytr = create_windows(train, args.window, 1)
-    Xv, yv = create_windows(val, args.window, 1)
-    Xt, yt = create_windows(test, args.window, 1)
-    Xtr_s, Xv_s, Xt_s, scaler = scale_train_val_test(Xtr, Xv, Xt)
-    # decoder dummy inputs (zeros) for training simplification
-    dec_tr = np.zeros((Xtr_s.shape[0], 1, Xtr_s.shape[2]))
-    dec_v = np.zeros((Xv_s.shape[0], 1, Xv_s.shape[2]))
-    model = build_model(args.window, data.shape[1])
-    model.fit([Xtr_s, dec_tr], ytr[:,0,:], validation_data=([Xv_s, dec_v], yv[:,0,:]), epochs=5, batch_size=64)
-    model.save('seq2seq_attention.h5')
-    print('Saved seq2seq_attention.h5')
+
+    train, val, test = (
+        data[:int(0.7*n)],
+        data[int(0.7*n):int(0.85*n)],
+        data[int(0.85*n):]
+    )
+
+    Xtr, ytr = create_windows(train, args.window, args.horizon)
+    Xv, yv = create_windows(val, args.window, args.horizon)
+
+    Xtr_s, Xv_s, _, scaler = scale_train_val_test(Xtr, Xv, Xv)
+
+    # decoder input → first feature frame repeated horizon times
+    dec_tr = np.zeros((len(Xtr_s), args.horizon, data.shape[1]))
+    dec_v = np.zeros((len(Xv_s), args.horizon, data.shape[1]))
+
+    model = build_seq2seq(args.window, data.shape[1], args.horizon)
+    model.fit([Xtr_s, dec_tr], ytr, validation_data=([Xv_s, dec_v], yv),
+              epochs=10, batch_size=64)
+
+    model.save("seq2seq_attention_fixed.h5")
+    print("Saved seq2seq_attention_fixed.h5")
+

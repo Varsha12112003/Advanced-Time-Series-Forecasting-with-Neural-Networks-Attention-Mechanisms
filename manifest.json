@@ -1,0 +1,14 @@
+{
+  "name": "advanced_ts_project",
+  "files": [
+    "README.md",
+    "REPORT.md",
+    "code/data_gen.py",
+    "code/preprocessing.py",
+    "code/baseline_lstm.py",
+    "code/seq2seq_attention.py",
+    "code/evaluate.py",
+    "code/requirements.txt",
+    "assets/screenshot.png"
+  ]
+}
